@@ -85,7 +85,16 @@ def process_api_key_and_nonce(func):
         api_key_index = bound_args.arguments.get("api_key_index", -1)
         nonce = bound_args.arguments.get("nonce", -1)
         if api_key_index == -1 and nonce == -1:
-            api_key_index, nonce = self.nonce_manager.next_nonce()
+            if self.nonce_manager is None:
+                self.nonce_manager = nonce_manager.nonce_manager_factory(
+                    nonce_manager_type=self._nonce_management_type,
+                    account_index=self.account_index,
+                    api_client=self.api_client,
+                    start_api_key=self.api_key_index,
+                    end_api_key=self.end_api_key_index,
+                )
+                api_key_index, nonce = self.nonce_manager.next_nonce()
+                
         err = self.switch_api_key(api_key_index)
         if err != None:
             raise Exception(f"error switching api key: {err}")
@@ -188,13 +197,9 @@ class SignerClient:
         self.api_client = lighter.ApiClient(configuration=Configuration(host=url))
         self.tx_api = lighter.TransactionApi(self.api_client)
         self.order_api = lighter.OrderApi(self.api_client)
-        self.nonce_manager = nonce_manager.nonce_manager_factory(
-            nonce_manager_type=nonce_management_type,
-            account_index=account_index,
-            api_client=self.api_client,
-            start_api_key=self.api_key_index,
-            end_api_key=self.end_api_key_index,
-        )
+        self._nonce_management_type = nonce_management_type
+        self.nonce_manager = None
+        
         for api_key in range(self.api_key_index, self.end_api_key_index + 1):
             self.create_client(api_key)
 
@@ -907,6 +912,11 @@ class SignerClient:
     async def close(self):
         await self.api_client.close()
 
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+        
     @staticmethod
     def are_keys_equal(key1, key2) -> bool:
         start_index1, start_index2 = 0, 0

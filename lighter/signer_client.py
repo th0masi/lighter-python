@@ -1,5 +1,6 @@
 import ctypes
 import asyncio
+import threading
 from functools import wraps
 import inspect
 import json
@@ -23,6 +24,8 @@ from lighter.transactions import CreateOrder, CancelOrder, Withdraw
 logging.basicConfig(level=logging.DEBUG)
 
 CODE_OK = 200
+
+_GLOBAL_SIGN_LOCK = threading.RLock()
 
 
 class ApiKeyResponse(ctypes.Structure):
@@ -76,13 +79,10 @@ def trim_exc(exception_body: str):
 def process_api_key_and_nonce(func):
     @wraps(func)
     async def wrapper(self, *args, **kwargs):
-        # Get the signature
         sig = inspect.signature(func)
 
-        # Bind args and kwargs to the function's signature
         bound_args = sig.bind(self, *args, **kwargs)
         bound_args.apply_defaults()
-        # Extract api_key_index and nonce from kwargs or use defaults
         api_key_index = bound_args.arguments.get("api_key_index", -1)
         nonce = bound_args.arguments.get("nonce", -1)
         if api_key_index == -1 and nonce == -1:
@@ -96,13 +96,11 @@ def process_api_key_and_nonce(func):
                 )
             api_key_index, nonce = self.nonce_manager.next_nonce()
 
-        # Сериализуем переключение ключа и подпись одной операции
         async with self._sign_lock:
             err = self.switch_api_key(api_key_index)
             if err is not None:
                 raise Exception(f"error switching api key: {err}")
 
-            # Call the original function with modified kwargs
             ret: TxHash
             try:
                 partial_arguments = {k: v for k, v in bound_args.arguments.items() if k not in ("self", "nonce", "api_key_index")}
@@ -180,7 +178,6 @@ class SignerClient:
         """
         chain_id = 304 if "mainnet" in url else 300
 
-        # api_key_index=0 is generally used by frontend
         if private_key.startswith("0x"):
             private_key = private_key[2:]
         self.url = url
@@ -286,7 +283,10 @@ class SignerClient:
             ctypes.c_longlong,
         ]
         self.signer.SignChangePubKey.restype = StrOrErr
-        result = self.signer.SignChangePubKey(ctypes.c_char_p(new_pubkey.encode("utf-8")), nonce)
+        with _GLOBAL_SIGN_LOCK:
+            # Обновляем контекст на (api_key_index, account_index)
+            self.create_client(self.api_key_index)
+            result = self.signer.SignChangePubKey(ctypes.c_char_p(new_pubkey.encode("utf-8")), nonce)
 
         tx_info_str = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -344,19 +344,21 @@ class SignerClient:
         ]
         self.signer.SignCreateOrder.restype = StrOrErr
 
-        result = self.signer.SignCreateOrder(
-            market_index,
-            client_order_index,
-            base_amount,
-            price,
-            int(is_ask),
-            order_type,
-            time_in_force,
-            reduce_only,
-            trigger_price,
-            order_expiry,
-            nonce,
-        )
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignCreateOrder(
+                market_index,
+                client_order_index,
+                base_amount,
+                price,
+                int(is_ask),
+                order_type,
+                time_in_force,
+                reduce_only,
+                trigger_price,
+                order_expiry,
+                nonce,
+            )
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -371,7 +373,9 @@ class SignerClient:
         ]
         self.signer.SignCancelOrder.restype = StrOrErr
 
-        result = self.signer.SignCancelOrder(market_index, order_index, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignCancelOrder(market_index, order_index, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -382,7 +386,9 @@ class SignerClient:
         self.signer.SignWithdraw.argtypes = [ctypes.c_longlong, ctypes.c_longlong]
         self.signer.SignWithdraw.restype = StrOrErr
 
-        result = self.signer.SignWithdraw(usdc_amount, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignWithdraw(usdc_amount, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -393,7 +399,9 @@ class SignerClient:
         self.signer.SignCreateSubAccount.argtypes = [ctypes.c_longlong]
         self.signer.SignCreateSubAccount.restype = StrOrErr
 
-        result = self.signer.SignCreateSubAccount(nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignCreateSubAccount(nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -408,7 +416,9 @@ class SignerClient:
         ]
         self.signer.SignCancelAllOrders.restype = StrOrErr
 
-        result = self.signer.SignCancelAllOrders(time_in_force, time, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignCancelAllOrders(time_in_force, time, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -426,7 +436,9 @@ class SignerClient:
         ]
         self.signer.SignModifyOrder.restype = StrOrErr
 
-        result = self.signer.SignModifyOrder(market_index, order_index, base_amount, price, trigger_price, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignModifyOrder(market_index, order_index, base_amount, price, trigger_price, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -442,7 +454,9 @@ class SignerClient:
             ctypes.c_longlong,
         ]
         self.signer.SignTransfer.restype = StrOrErr
-        result = self.signer.SignTransfer(to_account_index, usdc_amount, fee, ctypes.c_char_p(memo.encode("utf-8")), nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignTransfer(to_account_index, usdc_amount, fee, ctypes.c_char_p(memo.encode("utf-8")), nonce)
 
         tx_info_str = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -471,7 +485,9 @@ class SignerClient:
         ]
         self.signer.SignCreatePublicPool.restype = StrOrErr
 
-        result = self.signer.SignCreatePublicPool(operator_fee, initial_total_shares, min_operator_share_rate, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignCreatePublicPool(operator_fee, initial_total_shares, min_operator_share_rate, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -488,9 +504,11 @@ class SignerClient:
         ]
         self.signer.SignUpdatePublicPool.restype = StrOrErr
 
-        result = self.signer.SignUpdatePublicPool(
-            public_pool_index, status, operator_fee, min_operator_share_rate, nonce
-        )
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignUpdatePublicPool(
+                public_pool_index, status, operator_fee, min_operator_share_rate, nonce
+            )
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -505,7 +523,9 @@ class SignerClient:
         ]
         self.signer.SignMintShares.restype = StrOrErr
 
-        result = self.signer.SignMintShares(public_pool_index, share_amount, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignMintShares(public_pool_index, share_amount, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -520,7 +540,9 @@ class SignerClient:
         ]
         self.signer.SignBurnShares.restype = StrOrErr
 
-        result = self.signer.SignBurnShares(public_pool_index, share_amount, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignBurnShares(public_pool_index, share_amount, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -535,7 +557,9 @@ class SignerClient:
             ctypes.c_longlong,
         ]
         self.signer.SignUpdateLeverage.restype = StrOrErr
-        result = self.signer.SignUpdateLeverage(market_index, fraction, margin_mode, nonce)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.SignUpdateLeverage(market_index, fraction, margin_mode, nonce)
 
         tx_info = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -546,7 +570,9 @@ class SignerClient:
             deadline = int(time.time() + 10 * SignerClient.MINUTE)
         self.signer.CreateAuthToken.argtypes = [ctypes.c_longlong]
         self.signer.CreateAuthToken.restype = StrOrErr
-        result = self.signer.CreateAuthToken(deadline)
+        with _GLOBAL_SIGN_LOCK:
+            self.create_client(self.api_key_index)
+            result = self.signer.CreateAuthToken(deadline)
 
         auth = result.str.decode("utf-8") if result.str else None
         error = result.err.decode("utf-8") if result.err else None
@@ -918,6 +944,7 @@ class SignerClient:
 
     async def __aenter__(self):
         return self
+
     async def __aexit__(self, exc_type, exc, tb):
         await self.close()
         

@@ -284,7 +284,6 @@ class SignerClient:
         ]
         self.signer.SignChangePubKey.restype = StrOrErr
         with _GLOBAL_SIGN_LOCK:
-            # Обновляем контекст на (api_key_index, account_index)
             self.create_client(self.api_key_index)
             result = self.signer.SignChangePubKey(ctypes.c_char_p(new_pubkey.encode("utf-8")), nonce)
 

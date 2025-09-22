@@ -1,4 +1,5 @@
 import ctypes
+import asyncio
 from functools import wraps
 import inspect
 import json
@@ -93,26 +94,28 @@ def process_api_key_and_nonce(func):
                     start_api_key=self.api_key_index,
                     end_api_key=self.end_api_key_index,
                 )
-                api_key_index, nonce = self.nonce_manager.next_nonce()
-                
-        err = self.switch_api_key(api_key_index)
-        if err != None:
-            raise Exception(f"error switching api key: {err}")
+            api_key_index, nonce = self.nonce_manager.next_nonce()
 
-        # Call the original function with modified kwargs
-        ret: TxHash
-        try:
-            partial_arguments = {k: v for k, v in bound_args.arguments.items() if k not in ("self", "nonce", "api_key_index")}
-            created_tx, ret, err = await func(self, **partial_arguments, nonce=nonce, api_key_index=api_key_index)
-            if ret.code != CODE_OK:
-                self.nonce_manager.acknowledge_failure(api_key_index)
-        except lighter.exceptions.BadRequestException as e:
-            if "invalid nonce" in str(e):
-                self.nonce_manager.hard_refresh_nonce(api_key_index)
-                return None, None, trim_exc(str(e))
-            else:
-                self.nonce_manager.acknowledge_failure(api_key_index)
-                return None, None, trim_exc(str(e))
+        # Сериализуем переключение ключа и подпись одной операции
+        async with self._sign_lock:
+            err = self.switch_api_key(api_key_index)
+            if err is not None:
+                raise Exception(f"error switching api key: {err}")
+
+            # Call the original function with modified kwargs
+            ret: TxHash
+            try:
+                partial_arguments = {k: v for k, v in bound_args.arguments.items() if k not in ("self", "nonce", "api_key_index")}
+                created_tx, ret, err = await func(self, **partial_arguments, nonce=nonce, api_key_index=api_key_index)
+                if ret.code != CODE_OK:
+                    self.nonce_manager.acknowledge_failure(api_key_index)
+            except lighter.exceptions.BadRequestException as e:
+                if "invalid nonce" in str(e):
+                    self.nonce_manager.hard_refresh_nonce(api_key_index)
+                    return None, None, trim_exc(str(e))
+                else:
+                    self.nonce_manager.acknowledge_failure(api_key_index)
+                    return None, None, trim_exc(str(e))
 
         return created_tx, ret, err
 
@@ -199,6 +202,7 @@ class SignerClient:
         self.order_api = lighter.OrderApi(self.api_client)
         self._nonce_management_type = nonce_management_type
         self.nonce_manager = None
+        self._sign_lock = asyncio.Lock()
         
         for api_key in range(self.api_key_index, self.end_api_key_index + 1):
             self.create_client(api_key)
@@ -259,7 +263,7 @@ class SignerClient:
 
     def switch_api_key(self, api_key: int):
         self.signer.SwitchAPIKey.argtypes = [ctypes.c_int]
-        self.signer.CheckClient.restype = ctypes.c_char_p
+        self.signer.SwitchAPIKey.restype = ctypes.c_char_p
         result = self.signer.SwitchAPIKey(api_key)
         return result.decode("utf-8") if result else None
 
@@ -270,8 +274,8 @@ class SignerClient:
         self.signer.GenerateAPIKey.restype = ApiKeyResponse
         result = self.signer.GenerateAPIKey(ctypes.c_char_p(seed.encode("utf-8")))
 
-        private_key_str = result.str.decode("utf-8") if result.privateKey else None
-        public_key_str = result.str.decode("utf-8") if result.publicKey else None
+        private_key_str = result.privateKey.decode("utf-8") if result.privateKey else None
+        public_key_str = result.publicKey.decode("utf-8") if result.publicKey else None
         error = result.err.decode("utf-8") if result.err else None
 
         return private_key_str, public_key_str, error

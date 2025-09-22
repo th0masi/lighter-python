@@ -100,7 +100,8 @@ class ApiNonceManager(NonceManager):
         return (self.current_api_key, self.nonce[self.current_api_key])
 
     def refresh_nonce(self, api_key_index: int) -> int:
-        self.nonce[api_key_index] = get_nonce_from_api(self.api_client, self.start_api_key, self.end_api_key)
+        self.nonce[api_key_index] = get_nonce_from_api(self.api_client, self.account_index, api_key_index)
+        return self.nonce[api_key_index]
 
 
 class NonceManagerType(enum.Enum):
